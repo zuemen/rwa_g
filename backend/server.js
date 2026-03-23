@@ -29,10 +29,16 @@ const properties = [
     image: "https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&q=80&w=1400",
     totalValuationTWD: "NT$ 12.5 億",
     totalValuationUSDC: 40000000,
-    tokenPrice: 100, // 每單位 100 USDC
+    tokenPrice: 100, 
     totalTokens: 400000,
     soldTokens: 215000,
     apy: 6.8,
+    details: {
+        description: "本標的位於信義計畫區核心，為頂級 A 級辦公大樓。長期租戶包含跨國金融機構與知名科技企業，現金流穩定且具備高流動性。",
+        floorPlan: "https://example.com/floorplan.png",
+        constructionDate: "2018-06-15",
+        lastValuationDate: "2024-03-10"
+    },
     legal: {
         legalForm: "不動產投資信託 (Trust Structure)",
         trustee: "兆豐國際商業銀行 (模擬)",
@@ -41,26 +47,61 @@ const properties = [
         structure: "SRC 鋼骨混凝土",
         pings: 582.4,
         floor: "15F / 30F",
-        valuationReport: "https://example.com/valuation-2024.pdf"
+        valuationReport: "https://ipfs.io/ipfs/QmExampleReport..."
+    },
+    contractAddress: contractData.addresses.PropertyToken
+  },
+  {
+    id: 2,
+    title: "台中七期精華商辦 - 樂居貳號",
+    address: "台中市西屯區市政路 88 號",
+    image: "https://images.unsplash.com/photo-1577495508048-b635879837f1?auto=format&fit=crop&q=80&w=1400",
+    totalValuationTWD: "NT$ 8.2 億",
+    totalValuationUSDC: 26000000,
+    tokenPrice: 50,
+    totalTokens: 520000,
+    soldTokens: 480000,
+    apy: 7.2,
+    details: {
+        description: "位於台中七期重劃區，緊鄰市政府與國家歌劇院。此區域為中部企業總部首選，租金成長率連續三年超過 4%。",
+        floorPlan: "https://example.com/floorplan2.png",
+        constructionDate: "2020-11-20",
+        lastValuationDate: "2024-02-15"
+    },
+    legal: {
+        legalForm: "特定金錢信託",
+        trustee: "中國信託商業銀行 (模擬)",
+        landZoning: "新市政中心專用區",
+        usage: "辦公室",
+        structure: "SC 鋼骨構造",
+        pings: 425.8,
+        floor: "22F / 35F",
+        valuationReport: "https://ipfs.io/ipfs/QmExampleReport2..."
     },
     contractAddress: contractData.addresses.PropertyToken
   }
 ];
 
 let transactions = [
-    { id: 1, type: 'KYC', user: 'Admin', amount: 'N/A', date: new Date().toISOString(), status: 'SUCCESS' }
+    { id: 1, type: 'INITIAL', user: 'System', amount: 'N/A', date: new Date().toISOString(), status: 'SUCCESS' }
 ];
 
 app.get('/api/properties', (req, res) => res.json(properties));
 
-app.get('/api/config', (req, res) => {
-  res.json({
-    addresses: contractData.addresses,
-    abis: contractData.abis
-  });
+app.get('/api/admin/stats', async (req, res) => {
+    try {
+        const totalSupply = await propertyContract.totalSupply();
+        const balance = await usdcContract.balanceOf(contractData.addresses.RentalDistributor);
+        res.json({
+            totalPlatformSupply: ethers.formatUnits(totalSupply, 18),
+            distributorReserve: ethers.formatUnits(balance, 18),
+            activeInvestors: new Set(transactions.map(t => t.user)).size,
+            propertyCount: properties.length
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Stats failed" });
+    }
 });
-
-app.get('/api/transactions', (req, res) => res.json(transactions));
 
 app.post('/api/kyc', async (req, res) => {
   const { address } = req.body;
