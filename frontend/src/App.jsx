@@ -6,371 +6,290 @@ function App() {
   const [properties, setProperties] = useState([]);
   const [config, setConfig] = useState(null);
   const [transactions, setTransactions] = useState([]);
-  const [adminStats, setAdminStats] = useState(null);
   const [walletAddress, setWalletAddress] = useState("");
+  const [pwaBalance, setPwaBalance] = useState("0");
   const [kycStatus, setKycStatus] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [balance, setBalance] = useState("0");
   const [tokenBalance, setTokenBalance] = useState("0");
   const [claimableRent, setClaimableRent] = useState("0");
-  const [activeTab, setActiveTab] = useState('marketplace');
+  const [activeTab, setActiveTab] = useState('market');
   const [selectedProperty, setSelectedProperty] = useState(null);
 
   useEffect(() => { 
-    fetchProperties(); 
-    fetchConfig();
-    fetchTransactions();
-    fetchAdminStats();
+    initApp();
+    if (window.ethereum) {
+        window.ethereum.on('accountsChanged', (accs) => setWalletAddress(accs[0] || ""));
+    }
   }, []);
 
   useEffect(() => {
     if (walletAddress && config) {
-      checkBalances(walletAddress);
-      const interval = setInterval(() => {
-        checkBalances(walletAddress);
-        fetchTransactions();
-        fetchAdminStats();
-      }, 8000);
+      refreshData();
+      const interval = setInterval(refreshData, 10000);
       return () => clearInterval(interval);
     }
   }, [walletAddress, config]);
 
-  const fetchProperties = async () => {
-    const res = await axios.get('http://localhost:3001/api/properties');
-    setProperties(res.data);
-  };
-
-  const fetchConfig = async () => {
+  const initApp = async () => {
     try {
-        const res = await axios.get('http://localhost:3001/api/config');
-        setConfig(res.data);
-    } catch (e) { console.error("Failed to fetch config", e); }
+        const [conf, prop, txs] = await Promise.all([
+            axios.get('http://localhost:3001/api/config'),
+            axios.get('http://localhost:3001/api/properties'),
+            axios.get('http://localhost:3001/api/transactions')
+        ]);
+        setConfig(conf.data);
+        setProperties(prop.data);
+        setTransactions(txs.data);
+    } catch (e) { setMessage("Pepe Network Offline"); }
   };
 
-  const fetchTransactions = async () => {
+  const refreshData = async () => {
+    if (!walletAddress || !config) return;
     try {
-        const res = await axios.get('http://localhost:3001/api/transactions');
-        setTransactions(res.data);
-    } catch (e) { console.error("Failed to fetch transactions", e); }
-  };
+        const provider = new ethers.BrowserProvider(window.ethereum);
+        const usdc = new ethers.Contract(config.addresses.MockUSDC, config.abis.MockUSDC, provider);
+        const property = new ethers.Contract(config.addresses.PropertyToken, config.abis.PropertyToken, provider);
+        const registry = new ethers.Contract(config.addresses.IdentityRegistry, config.abis.IdentityRegistry, provider);
 
-  const fetchAdminStats = async () => {
-    try {
-        const res = await axios.get('http://localhost:3001/api/admin/stats');
-        setAdminStats(res.data);
-    } catch (e) { console.warn("Admin stats unavailable"); }
-  };
-
-  const connectWallet = async () => {
-    if (window.ethereum) {
-        try {
-            const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-            setWalletAddress(accounts[0]);
-        } catch (e) { setMessage("連線失敗"); }
-    } else { setMessage("請安裝 MetaMask"); }
-  };
-
-  const checkBalances = async (address) => {
-    if (!config) return;
-    const provider = new ethers.BrowserProvider(window.ethereum);
-    
-    const { addresses } = config;
-    const usdcAddr = addresses.MockUSDC;
-    const tokenAddr = addresses.PropertyToken;
-    const registryAddr = addresses.IdentityRegistry;
-    
-    const abi = ["function balanceOf(address) view returns (uint256)"];
-    const registryAbi = ["function checkIdentity(address) view returns (bool)"];
-    
-    try {
-        const usdc = new ethers.Contract(usdcAddr, abi, provider);
-        const property = new ethers.Contract(tokenAddr, abi, provider);
-        const registry = new ethers.Contract(registryAddr, registryAbi, provider);
-
-        const [uBal, pBal, isV] = await Promise.all([
-            usdc.balanceOf(address),
-            property.balanceOf(address),
-            registry.checkIdentity(address)
+        const [uBal, pBal, isV, pwaRes, rentRes] = await Promise.all([
+            usdc.balanceOf(walletAddress),
+            property.balanceOf(walletAddress),
+            registry.checkIdentity(walletAddress),
+            axios.get(`http://localhost:3001/api/pwa/balance/${walletAddress}`),
+            axios.get(`http://localhost:3001/api/rewards/${walletAddress}`)
         ]);
 
         setBalance(ethers.formatUnits(uBal, 18));
         setTokenBalance(ethers.formatUnits(pBal, 18));
         setKycStatus(isV);
-
-        const res = await axios.get(`http://localhost:3001/api/rewards/${address}`);
-        setClaimableRent(res.data.claimable);
-    } catch(e) { console.warn("Syncing..."); }
+        setPwaBalance(pwaRes.data.balance);
+        setClaimableRent(rentRes.data.claimable);
+        
+        const txs = await axios.get('http://localhost:3001/api/transactions');
+        setTransactions(txs.data);
+    } catch (e) { console.warn(e); }
   };
 
-  const completeKyc = async () => {
+  const connectWallet = async () => {
+    if (!window.ethereum) return setMessage("MetaMask Required");
+    try {
+        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        setWalletAddress(accounts[0]);
+    } catch (e) { setMessage("Connect Failed"); }
+  };
+
+  const buyPwa = async (usdcAmount) => {
     setLoading(true);
     try {
-        const res = await axios.post('http://localhost:3001/api/kyc', { address: walletAddress });
+        const res = await axios.post('http://localhost:3001/api/pwa/buy', { address: walletAddress, usdcAmount });
         setMessage(res.data.message);
-        await checkBalances(walletAddress);
-    } catch (e) { setMessage("認證失敗"); }
+        refreshData();
+    } catch (e) { setMessage("Swap Failed"); }
     setLoading(false);
   };
 
-  const buyTokens = async (qty) => {
-    if (!kycStatus) return setMessage("請先完成線上實名認證");
+  const invest = async (amount) => {
+    if (!kycStatus) return setMessage("Complete KYC First");
     setLoading(true);
     try {
-        const res = await axios.post('http://localhost:3001/api/buy', { address: walletAddress, amount: qty });
-        setMessage(res.data.message);
-        await checkBalances(walletAddress);
-    } catch (e) { setMessage("交易失敗"); }
+        await axios.post('http://localhost:3001/api/buy', { address: walletAddress, amount });
+        setMessage("Investment Confirmed on PepeChain");
+        refreshData();
+    } catch (e) { setMessage("Investment Failed"); }
     setLoading(false);
   };
 
-  const claimRent = async () => {
-    if (!config) return;
+  const claimRewards = async () => {
     setLoading(true);
     try {
         const provider = new ethers.BrowserProvider(window.ethereum);
         const signer = await provider.getSigner();
-        const distributor = new ethers.Contract(config.addresses.RentalDistributor, ["function claimRent() external"], signer);
+        const distributor = new ethers.Contract(config.addresses.RentalDistributor, config.abis.RentalDistributor, signer);
         await (await distributor.claimRent()).wait();
-        setMessage("收益提領成功！");
-        await checkBalances(walletAddress);
-    } catch (e) { setMessage("提領失敗"); }
-    setLoading(false);
-  };
-
-  const distributeRentAdmin = async () => {
-    setLoading(true);
-    try {
-        const res = await axios.post('http://localhost:3001/api/admin/distribute-rent');
-        setMessage(res.data.message);
-        fetchAdminStats();
-    } catch (e) { setMessage("分派失敗"); }
+        setMessage("Yield Claimed Successfully!");
+        refreshData();
+    } catch (e) { setMessage("Claim Failed"); }
     setLoading(false);
   };
 
   return (
-    <div style={appContainer}>
-      {/* 頂部導覽 */}
-      <nav style={navbarStyle}>
-        <div style={navInner}>
-          <div style={logoArea}>
-            <span style={logoIcon}>🏦</span>
-            <div style={logoText}>
-              <h1 style={brandName}>樂居鏈 RWA </h1>
-              <p style={brandSub}>Institutional Real Estate Tokenization</p>
+    <div style={globalStyle}>
+      {/* Sidebar */}
+      <nav style={sidebarStyle}>
+        <div style={logoContainer}>
+            <div style={logoCircle}>P</div>
+            <div style={logoTextGroup}>
+                <h1 style={logoName}>Pepe RWA</h1>
+                <span style={logoVersion}>Mainnet v1.0</span>
             </div>
-          </div>
-          <div style={navActions}>
+        </div>
+        
+        <div style={navGroup}>
+            <button onClick={() => setActiveTab('market')} style={activeTab === 'market' ? navBtnActive : navBtn}>🏛 Marketplace</button>
+            <button onClick={() => setActiveTab('portfolio')} style={activeTab === 'portfolio' ? navBtnActive : navBtn}>📊 Dashboard</button>
+            <button onClick={() => setActiveTab('pwa')} style={activeTab === 'pwa' ? navBtnActive : navBtn}>💎 $PWA Token</button>
+            <button onClick={() => setActiveTab('legal')} style={activeTab === 'legal' ? navBtnActive : navBtn}>⚖ Legal Docs</button>
+        </div>
+
+        <div style={sidebarUser}>
             {walletAddress ? (
-                <div style={walletBadge}>
-                    <div style={dot(kycStatus)}></div>
-                    <span>{walletAddress.substring(0, 6)}...{walletAddress.slice(-4)}</span>
+                <div style={statusCard}>
+                    <p style={statusLabel}>Pepe Identity</p>
+                    <div style={statusRow}>
+                        <div style={dot(kycStatus)}></div>
+                        <span style={addressText}>{walletAddress.slice(0,6)}...{walletAddress.slice(-4)}</span>
+                    </div>
                 </div>
             ) : (
-                <button onClick={connectWallet} style={primaryBtn}>連接 Web3 錢包</button>
+                <button onClick={connectWallet} style={connectBtn}>Connect Wallet</button>
             )}
-          </div>
         </div>
       </nav>
 
-      <div style={layoutInner}>
-        {/* 側邊導覽 */}
-        <aside style={sidebarStyle}>
-          <div style={sideSection}>
-            <p style={sideLabel}>投資服務</p>
-            <button onClick={() => setActiveTab('marketplace')} style={activeTab === 'marketplace' ? activeSideBtn : sideBtn}>🏛️ 投資市場</button>
-            <button onClick={() => setActiveTab('portfolio')} style={activeTab === 'portfolio' ? activeSideBtn : sideBtn}>📈 我的資產</button>
-          </div>
-          <div style={sideSection}>
-            <p style={sideLabel}>合規與管理</p>
-            <button onClick={() => setActiveTab('legal')} style={activeTab === 'legal' ? activeSideBtn : sideBtn}>📜 法規披露</button>
-            <button onClick={() => setActiveTab('admin')} style={activeTab === 'admin' ? activeSideBtn : sideBtn}>⚙️ 平台管理</button>
-          </div>
-          
-          <div style={sidebarFooter}>
-            <p>即時匯率</p>
-            <h3>1 USDC ≈ 31.8 TWD</h3>
-          </div>
-        </aside>
+      {/* Main Content */}
+      <main style={mainStyle}>
+        <header style={headerStyle}>
+            <div style={headerLeft}>
+                <h2 style={pageTitle}>{activeTab.toUpperCase()}</h2>
+                <p style={pageSub}>{activeTab === 'market' ? 'Institutional Grade Real World Assets' : 'Manage your Pepe Ecosystem assets'}</p>
+            </div>
+            <div style={headerStats}>
+                <div style={hStatItem}><p>USDC</p><strong>${parseFloat(balance).toFixed(2)}</strong></div>
+                <div style={hStatItem}><p>$PWA</p><strong style={{color: '#00ff88'}}>{pwaBalance}</strong></div>
+            </div>
+        </header>
 
-        {/* 主內容區 */}
-        <main style={contentStyle}>
-          {activeTab === 'marketplace' && (
-            <>
-              <div style={heroBanner}>
-                <h2 style={{fontSize: '28px', margin: '0 0 10px 0'}}>精選 RWA 物件市場</h2>
-                <p style={{color: '#6b7280'}}>所有物件皆經過第三方受託銀行信託，確保資產安全性與合規性。</p>
-              </div>
-
-              {walletAddress && !kycStatus && (
-                <div style={kycBox}>
-                    <div style={{ flex: 1 }}>
-                        <h4 style={{ margin: '0 0 5px 0' }}>🔐 依據台灣 STO 規範：身分查核</h4>
-                        <p style={{ margin: 0, fontSize: '13px', opacity: 0.9 }}>
-                            房地產代幣涉及證券性質，投資前必須完成實名認證 (KYC) 與洗錢防制 (AML) 流程。
-                        </p>
-                    </div>
-                    <button onClick={completeKyc} disabled={loading} style={kycBtn}>立即線上認證</button>
+        <section style={contentWrapper}>
+            {activeTab === 'market' && (
+                <div style={grid}>
+                    {properties.map(p => (
+                        <div key={p.id} style={cardStyle} onClick={() => setSelectedProperty(p)}>
+                            <div style={cardImgArea}>
+                                <img src={p.image} style={cardImg} alt="" />
+                                <div style={apyBadge}>{p.apy}% APY</div>
+                            </div>
+                            <div style={cardBody}>
+                                <h3 style={cardTitle}>{p.title}</h3>
+                                <p style={cardAddr}>📍 {p.address}</p>
+                                <div style={metricRow}>
+                                    <div style={metric}><span>IRR</span><strong>{p.irr}</strong></div>
+                                    <div style={metric}><span>Liquidity</span><strong style={{color: '#00ff88'}}>{p.liquidity}</strong></div>
+                                    <div style={metric}><span>Risk</span><strong>{p.riskLevel}</strong></div>
+                                </div>
+                                <div style={progressContainer}>
+                                    <div style={progressLabel}><span>Funding</span><span>{((p.soldTokens / p.totalTokens) * 100).toFixed(1)}%</span></div>
+                                    <div style={progressBar}><div style={{...progressFill, width: `${(p.soldTokens / p.totalTokens) * 100}%`}}></div></div>
+                                </div>
+                                <div style={cardFooter}>
+                                    <div style={priceGroup}><p>Price per Unit</p><strong>${p.tokenPrice} USDC</strong></div>
+                                    <button onClick={(e) => {e.stopPropagation(); invest(100);}} disabled={loading || !kycStatus} style={investBtn}>Invest Now</button>
+                                </div>
+                            </div>
+                        </div>
+                    ))}
                 </div>
-              )}
+            )}
 
-              <div style={propertyList}>
-                {properties.map(p => (
-                  <div key={p.id} style={pCard} onClick={() => setSelectedProperty(p)}>
-                    <div style={pImgArea}>
-                        <img src={p.image} style={pImg} alt="" />
-                        <div style={pBadge}>受託：{p.legal.trustee}</div>
+            {activeTab === 'portfolio' && (
+                <div style={dashboardGrid}>
+                    <div style={statBox}>
+                        <p>Total Asset Value</p>
+                        <h2>${(parseFloat(tokenBalance) * 100 + parseFloat(balance)).toLocaleString()} <small>USDC</small></h2>
+                        <span style={{color: '#00ff88'}}>+4.2% Total Growth</span>
                     </div>
-                    <div style={pBody}>
-                        <h3 style={pTitle}>{p.title}</h3>
-                        <p style={pAddr}>📍 {p.address}</p>
+                    <div style={statBox}>
+                        <p>Real Estate Units</p>
+                        <h2>{tokenBalance} <small>Units</small></h2>
+                        <span>Active Holdings: {properties.length}</span>
+                    </div>
+                    <div style={{...statBox, background: 'linear-gradient(135deg, #00D084 0%, #008855 100%)', color: '#fff'}}>
+                        <p style={{color: '#fff', opacity: 0.8}}>Claimable Yield</p>
+                        <h2 style={{color: '#fff'}}>${parseFloat(claimableRent).toFixed(4)} <small>USDC</small></h2>
+                        <button onClick={claimRewards} disabled={loading || parseFloat(claimableRent) <= 0} style={whiteBtn}>Claim Yield</button>
+                    </div>
+
+                    <div style={wideTable}>
+                        <h3 style={tableHeading}>Recent PepeChain Transactions</h3>
+                        <table style={table}>
+                            <thead><tr><th style={th}>Activity</th><th style={th}>Entity</th><th style={th}>Volume</th><th style={th}>Timestamp</th><th style={th}>Status</th></tr></thead>
+                            <tbody>
+                                {transactions.map(tx => (
+                                    <tr key={tx.id} style={tr}>
+                                        <td style={td}><strong>{tx.type}</strong></td>
+                                        <td style={td}>{tx.user.slice(0,12)}...</td>
+                                        <td style={td}>{tx.amount}</td>
+                                        <td style={td}>{new Date(tx.date).toLocaleTimeString()}</td>
+                                        <td style={td}><span style={statusTag}>Verified</span></td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
+
+            {activeTab === 'pwa' && (
+                <div style={pwaSwapContainer}>
+                    <div style={swapCard}>
+                        <h2 style={{margin: '0 0 10px 0'}}>Get $PWA Token</h2>
+                        <p style={{color: '#94a3b8', fontSize: '14px', marginBottom: '30px'}}>Powering the world's most advanced RWA ecosystem.</p>
                         
-                        <div style={pMetaGrid}>
-                            <div style={pMetaItem}><span>預估收益率</span><strong style={{color: '#10b981'}}>{p.apy}%</strong></div>
-                            <div style={pMetaItem}><span>建物用途</span><strong>{p.legal.usage}</strong></div>
-                            <div style={pMetaItem}><span>資產總值</span><strong>{p.totalValuationTWD}</strong></div>
-                            <div style={pMetaItem}><span>起投金額</span><strong>${p.tokenPrice} USDC</strong></div>
+                        <div style={inputGroup}>
+                            <label>You Pay (USDC)</label>
+                            <input type="number" defaultValue="100" style={swapInput} />
+                        </div>
+                        <div style={swapArrow}>↓</div>
+                        <div style={inputGroup}>
+                            <label>You Receive ($PWA)</label>
+                            <div style={swapResult}>1,000 PWA</div>
                         </div>
 
-                        <div style={pProgress}>
-                            <div style={pProgressInfo}><span>認購進度</span><span>{((p.soldTokens / p.totalTokens) * 100).toFixed(1)}%</span></div>
-                            <div style={pProgressTrack}><div style={{...pProgressFill, width: `${(p.soldTokens / p.totalTokens) * 100}%`}}></div></div>
+                        <button onClick={() => buyPwa(100)} disabled={loading} style={swapBtn}>
+                            {loading ? "Processing..." : "Swap USDC for $PWA"}
+                        </button>
+
+                        <div style={pwaInfo}>
+                            <div style={pwaInfoItem}><span>Rate</span><strong>1 USDC = 10 PWA</strong></div>
+                            <div style={pwaInfoItem}><span>Utility</span><strong>Governance, Staking, Fee Discounts</strong></div>
                         </div>
-
-                        <div style={pFooter}>
-                            <button onClick={(e) => { e.stopPropagation(); buyTokens(100); }} disabled={loading || !kycStatus} style={buyBtn}>立即認購</button>
-                            <span style={{fontSize: '12px', color: '#9ca3af'}}>點擊查看詳情</span>
-                        </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-
-          {activeTab === 'portfolio' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '40px' }}>
-                <div style={portfolioGrid}>
-                    <div style={statCard}>
-                        <p>持有單位</p>
-                        <h2>{parseFloat(tokenBalance).toLocaleString()} <small>Units</small></h2>
-                        <span style={{fontSize: '12px', color: '#6b7280'}}>佔比 0.25%</span>
-                    </div>
-                    <div style={statCard}>
-                        <p>累計收益 (USDC)</p>
-                        <h2>${parseFloat(balance).toLocaleString()}</h2>
-                        <span style={{color: '#10b981', fontSize: '12px'}}>+2.4% MoM</span>
-                    </div>
-                    <div style={{...statCard, backgroundColor: '#008855', color: '#fff'}}>
-                        <p style={{color: '#fff', opacity: 0.8}}>可提領租金 (USDC)</p>
-                        <h2 style={{color: '#fff'}}>${parseFloat(claimableRent).toFixed(4)}</h2>
-                        <button onClick={claimRent} disabled={loading || parseFloat(claimableRent) <= 0} style={claimBtnStyle}>撥款至錢包</button>
                     </div>
                 </div>
+            )}
 
-                <div style={tableCard}>
-                    <h3 style={{ marginBottom: '20px' }}>近期交易活動</h3>
-                    <table style={tableStyle}>
-                        <thead>
-                            <tr style={thStyle}>
-                                <th style={tdStyle}>類型</th>
-                                <th style={tdStyle}>用戶</th>
-                                <th style={tdStyle}>金額/單位</th>
-                                <th style={tdStyle}>時間</th>
-                                <th style={tdStyle}>狀態</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {transactions.slice(0, 8).map(tx => (
-                                <tr key={tx.id} style={trStyle}>
-                                    <td style={tdStyle}><strong>{tx.type}</strong></td>
-                                    <td style={tdStyle}>{tx.user.substring(0, 10)}...</td>
-                                    <td style={tdStyle}>{tx.amount}</td>
-                                    <td style={tdStyle}>{new Date(tx.date).toLocaleString()}</td>
-                                    <td style={tdStyle}><span style={statusBadge}>{tx.status}</span></td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-          )}
-
-          {activeTab === 'admin' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '40px' }}>
-                <div style={heroBanner}>
-                    <h2 style={{fontSize: '28px', margin: '0 0 10px 0'}}>平台管理中心</h2>
-                    <p style={{color: '#6b7280'}}>僅供授權管理員執行系統級操作與收益分派。</p>
-                </div>
-
-                <div style={portfolioGrid}>
-                    <div style={statCard}>
-                        <p>全平台代幣供應量</p>
-                        <h2>{parseFloat(adminStats?.totalPlatformSupply || 0).toLocaleString()}</h2>
-                    </div>
-                    <div style={statCard}>
-                        <p>分潤合約儲備 (USDC)</p>
-                        <h2>${parseFloat(adminStats?.distributorReserve || 0).toLocaleString()}</h2>
-                    </div>
-                    <div style={statCard}>
-                        <p>活躍投資人</p>
-                        <h2>{adminStats?.activeInvestors || 0} <small>位</small></h2>
-                    </div>
-                </div>
-
-                <div style={adminActionCard}>
+            {!kycStatus && walletAddress && (
+                <div style={kycAlert}>
                     <div style={{flex: 1}}>
-                        <h3>💰 每月收益分派</h3>
-                        <p>系統將自動依照持份比例，將信託專戶中的租金收益分發給所有代幣持有人。</p>
+                        <h3>Verification Required</h3>
+                        <p>Regulatory compliance is key. Complete your Pepe-KYC to unlock institutional asset markets.</p>
                     </div>
-                    <button onClick={distributeRentAdmin} disabled={loading} style={adminBtn}>執行收益分派</button>
+                    <button onClick={completeKyc} disabled={loading} style={kycActionBtn}>Verify Identity</button>
                 </div>
-            </div>
-          )}
+            )}
+        </section>
+      </main>
 
-          {activeTab === 'legal' && (
-            <div style={legalPage}>
-                <h2 style={{marginBottom: '30px'}}>台灣 RWA 不動產代幣化法規說明</h2>
-                <div style={legalSection}>
-                    <h4>1. 法律架構：不動產投資信託 (Trust Structure)</h4>
-                    <p>本平台物件皆採「信託架構」設計。資產名義所有權歸屬於受託銀行（如：兆豐、中信等），確保發行方破產時，投資人權益受到破產隔離保護。</p>
-                </div>
-                <div style={legalSection}>
-                    <h4>2. 資訊披露與估價</h4>
-                    <p>依據內政部規定，每半年由兩家以上合格之估價師事務所進行資產重估，報告皆會同步於鏈上 (IPFS) 存證。</p>
-                </div>
-                <div style={warningBox}>⚠️ 投資警語：不動產投資涉及風險，認購前請詳閱公開說明書。</div>
-            </div>
-          )}
-        </main>
-      </div>
-
-      {/* 物件詳情彈窗 */}
+      {/* Detail Modal */}
       {selectedProperty && (
           <div style={modalOverlay} onClick={() => setSelectedProperty(null)}>
               <div style={modalContent} onClick={e => e.stopPropagation()}>
-                  <div style={modalHeader}>
+                  <header style={modalHeader}>
                       <h2>{selectedProperty.title}</h2>
                       <button onClick={() => setSelectedProperty(null)} style={closeBtn}>✕</button>
-                  </div>
+                  </header>
                   <div style={modalBody}>
                       <img src={selectedProperty.image} style={modalImg} alt="" />
-                      <div style={modalSection}>
-                          <h3>物件描述</h3>
+                      <div style={modalDesc}>
+                          <h3>Property Strategy</h3>
                           <p>{selectedProperty.details.description}</p>
                       </div>
-                      <div style={modalGrid}>
-                          <div style={modalInfoItem}><span>建築結構</span><strong>{selectedProperty.legal.structure}</strong></div>
-                          <div style={modalInfoItem}><span>坪數</span><strong>{selectedProperty.legal.pings} 坪</strong></div>
-                          <div style={modalInfoItem}><span>竣工日期</span><strong>{selectedProperty.details.constructionDate}</strong></div>
-                          <div style={modalInfoItem}><span>最後估價日</span><strong>{selectedProperty.details.lastValuationDate}</strong></div>
+                      <div style={tagCloud}>
+                          {selectedProperty.details.tags.map(t => <span key={t} style={tag}>#{t}</span>)}
                       </div>
-                      <div style={modalSection}>
-                          <h3>法律與合規文件</h3>
-                          <div style={docLinkCard}>
-                              <span>📜 估價報告書 (Valuation Report)</span>
-                              <a href={selectedProperty.legal.valuationReport} target="_blank" rel="noreferrer">查看原文</a>
-                          </div>
+                      <div style={modalLegal}>
+                          <p>Custodian: <strong>{selectedProperty.legal.trustee}</strong></p>
+                          <a href={selectedProperty.legal.valuationReport} style={{color: '#00ff88'}}>Download Audit Report (PDF)</a>
                       </div>
                   </div>
               </div>
@@ -382,78 +301,69 @@ function App() {
   );
 }
 
-// 樣式定義 (Institutional Look)
-const appContainer = { backgroundColor: '#f4f7f6', minHeight: '100vh', color: '#1f2937', fontFamily: '"PingFang TC", "Microsoft JhengHei", sans-serif' };
-const navbarStyle = { height: '80px', backgroundColor: '#fff', borderBottom: '1px solid #e5e7eb', position: 'sticky', top: 0, zIndex: 1000 };
-const navInner = { maxWidth: '1400px', margin: '0 auto', height: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 30px' };
-const logoArea = { display: 'flex', alignItems: 'center', gap: '15px' };
-const logoIcon = { fontSize: '32px' };
-const brandName = { margin: 0, fontSize: '20px', fontWeight: 'bold', color: '#008855' };
-const brandSub = { margin: 0, fontSize: '11px', color: '#9ca3af', letterSpacing: '1px' };
-const navActions = { display: 'flex', alignItems: 'center' };
-const primaryBtn = { backgroundColor: '#008855', color: '#fff', border: 'none', padding: '12px 24px', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer', transition: 'all 0.2s' };
-const walletBadge = { backgroundColor: '#f3f4f6', padding: '10px 18px', borderRadius: '50px', display: 'flex', alignItems: 'center', gap: '10px', fontSize: '14px', border: '1px solid #e5e7eb' };
-const dot = (active) => ({ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: active ? '#10b981' : '#ef4444' });
+// --- STYLES (Professional Dark Theme) ---
+const globalStyle = { backgroundColor: '#0f172a', minHeight: '100vh', display: 'flex', color: '#f8fafc', fontFamily: "'Inter', system-ui, sans-serif" };
+const sidebarStyle = { width: '280px', backgroundColor: '#1e293b', borderRight: '1px solid #334155', display: 'flex', flexDirection: 'column', padding: '40px 20px', position: 'fixed', height: '100vh' };
+const logoContainer = { display: 'flex', alignItems: 'center', gap: '15px', marginBottom: '60px', padding: '0 10px' };
+const logoCircle = { width: '45px', height: '45px', borderRadius: '12px', background: 'linear-gradient(135deg, #00ff88 0%, #008855 100%)', display: 'flex', justifyContent: 'center', alignItems: 'center', fontSize: '24px', fontWeight: 'bold', color: '#0f172a' };
+const logoName = { fontSize: '22px', fontWeight: '800', margin: 0, color: '#fff' };
+const logoVersion = { fontSize: '10px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '1px' };
+const navGroup = { display: 'flex', flexDirection: 'column', gap: '8px', flex: 1 };
+const navBtn = { textAlign: 'left', padding: '14px 20px', borderRadius: '12px', border: 'none', backgroundColor: 'transparent', color: '#94a3b8', fontSize: '15px', fontWeight: '600', cursor: 'pointer', transition: '0.2s' };
+const navBtnActive = { ...navBtn, backgroundColor: '#00ff8815', color: '#00ff88' };
+const sidebarUser = { marginTop: 'auto' };
+const statusCard = { backgroundColor: '#334155', padding: '15px', borderRadius: '16px' };
+const statusRow = { display: 'flex', alignItems: 'center', gap: '10px' };
+const addressText = { fontSize: '13px', color: '#cbd5e1', fontFamily: 'monospace' };
+const connectBtn = { width: '100%', padding: '14px', borderRadius: '12px', border: 'none', background: '#00ff88', color: '#0f172a', fontWeight: 'bold', cursor: 'pointer' };
 
-const layoutInner = { maxWidth: '1400px', margin: '0 auto', display: 'grid', gridTemplateColumns: '260px 1fr', minHeight: 'calc(100vh - 80px)' };
-const sidebarStyle = { padding: '30px 15px', borderRight: '1px solid #e5e7eb', backgroundColor: '#fff', display: 'flex', flexDirection: 'column', gap: '20px' };
-const sideSection = { display: 'flex', flexDirection: 'column', gap: '5px' };
-const sideLabel = { fontSize: '12px', color: '#9ca3af', fontWeight: 'bold', padding: '0 15px', marginBottom: '5px' };
-const sideBtn = { textAlign: 'left', border: 'none', padding: '12px 15px', borderRadius: '10px', backgroundColor: 'transparent', cursor: 'pointer', fontSize: '15px', color: '#4b5563', transition: 'all 0.2s' };
-const activeSideBtn = { ...sideBtn, backgroundColor: '#f0fdf4', color: '#059669', fontWeight: 'bold' };
-const sidebarFooter = { marginTop: 'auto', padding: '20px', backgroundColor: '#f9fafb', borderRadius: '12px' };
+const mainStyle = { marginLeft: '280px', flex: 1, padding: '40px 60px' };
+const headerStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '50px' };
+const pageTitle = { fontSize: '32px', margin: '0 0 5px 0', letterSpacing: '-1px' };
+const pageSub = { color: '#64748b', fontSize: '16px' };
+const headerStats = { display: 'flex', gap: '30px' };
+const hStatItem = { textAlign: 'right' };
 
-const contentStyle = { padding: '40px 50px' };
-const heroBanner = { marginBottom: '40px' };
-const kycBox = { backgroundColor: '#008855', color: '#fff', padding: '20px 30px', borderRadius: '16px', display: 'flex', alignItems: 'center', marginBottom: '40px', boxShadow: '0 10px 25px -5px rgba(0, 136, 85, 0.3)' };
-const kycBtn = { backgroundColor: '#fff', color: '#008855', border: 'none', padding: '10px 25px', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' };
+const contentWrapper = { display: 'flex', flexDirection: 'column', gap: '40px' };
+const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: '30px' };
+const cardStyle = { backgroundColor: '#1e293b', borderRadius: '24px', overflow: 'hidden', border: '1px solid #334155', transition: '0.3s', cursor: 'pointer' };
+const cardImgArea = { height: '220px', position: 'relative' };
+const cardImg = { width: '100%', height: '100%', objectFit: 'cover' };
+const apyBadge = { position: 'absolute', top: '20px', right: '20px', backgroundColor: '#00ff88', color: '#0f172a', padding: '6px 14px', borderRadius: '50px', fontWeight: 'bold', fontSize: '13px' };
+const cardBody = { padding: '25px' };
+const cardTitle = { fontSize: '20px', margin: '0 0 8px 0' };
+const cardAddr = { color: '#64748b', fontSize: '14px', marginBottom: '20px' };
+const metricRow = { display: 'flex', justifyContent: 'space-between', marginBottom: '25px', backgroundColor: '#0f172a', padding: '15px', borderRadius: '16px' };
+const metric = { display: 'flex', flexDirection: 'column', fontSize: '12px', color: '#64748b' };
+const progressContainer = { marginBottom: '25px' };
+const progressBar = { height: '8px', backgroundColor: '#334155', borderRadius: '10px' };
+const progressFill = { height: '100%', backgroundColor: '#00ff88', borderRadius: '10px' };
+const cardFooter = { display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #334155', paddingTop: '20px' };
+const investBtn = { background: '#00ff8815', color: '#00ff88', border: '1px solid #00ff88', padding: '10px 20px', borderRadius: '10px', fontWeight: 'bold', cursor: 'pointer' };
 
-const propertyList = { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(400px, 1fr))', gap: '30px' };
-const pCard = { backgroundColor: '#fff', borderRadius: '20px', overflow: 'hidden', border: '1px solid #e5e7eb', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05)', cursor: 'pointer', transition: 'transform 0.2s' };
-const pImgArea = { height: '240px', position: 'relative' };
-const pImg = { width: '100%', height: '100%', objectFit: 'cover' };
-const pBadge = { position: 'absolute', top: '15px', right: '15px', backgroundColor: 'rgba(255,255,255,0.9)', padding: '5px 12px', borderRadius: '50px', fontSize: '11px', fontWeight: 'bold' };
-const pBody = { padding: '25px' };
-const pTitle = { margin: '0 0 10px 0', fontSize: '19px', color: '#111827' };
-const pAddr = { color: '#6b7280', fontSize: '13px', marginBottom: '20px' };
-const pMetaGrid = { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px', marginBottom: '20px' };
-const pMetaItem = { display: 'flex', flexDirection: 'column', fontSize: '12px', color: '#9ca3af' };
-const pProgress = { marginBottom: '25px' };
-const pProgressInfo = { display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '8px', color: '#4b5563' };
-const pProgressTrack = { height: '6px', backgroundColor: '#f3f4f6', borderRadius: '10px' };
-const pProgressFill = { height: '100%', backgroundColor: '#008855' };
-const pFooter = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid #f3f4f6', paddingTop: '20px' };
-const buyBtn = { backgroundColor: '#008855', color: '#fff', border: 'none', padding: '10px 25px', borderRadius: '10px', fontWeight: 'bold', cursor: 'pointer' };
+const dashboardGrid = { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '30px' };
+const statBox = { backgroundColor: '#1e293b', padding: '30px', borderRadius: '24px', border: '1px solid #334155' };
+const whiteBtn = { marginTop: '20px', width: '100%', padding: '12px', border: 'none', borderRadius: '12px', background: '#fff', color: '#008855', fontWeight: 'bold', cursor: 'pointer' };
+const wideTable = { gridColumn: 'span 3', backgroundColor: '#1e293b', padding: '30px', borderRadius: '24px' };
+const table = { width: '100%', borderCollapse: 'collapse', textAlign: 'left' };
+const th = { color: '#64748b', padding: '15px', borderBottom: '1px solid #334155' };
+const td = { padding: '15px', borderBottom: '1px solid #0f172a' };
+const statusTag = { padding: '4px 12px', backgroundColor: '#00ff8815', color: '#00ff88', borderRadius: '50px', fontSize: '12px' };
 
-const portfolioGrid = { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '25px' };
-const statCard = { padding: '25px', backgroundColor: '#fff', borderRadius: '16px', border: '1px solid #e5e7eb' };
-const claimBtnStyle = { marginTop: '15px', width: '100%', padding: '10px', borderRadius: '8px', border: 'none', backgroundColor: '#fff', color: '#008855', fontWeight: 'bold', cursor: 'pointer' };
+const pwaSwapContainer = { display: 'flex', justifyContent: 'center', paddingTop: '40px' };
+const swapCard = { backgroundColor: '#1e293b', padding: '40px', borderRadius: '32px', width: '100%', maxWidth: '450px', border: '1px solid #334155', textAlign: 'center' };
+const swapInput = { width: '100%', padding: '18px', backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '16px', color: '#fff', fontSize: '20px', fontWeight: 'bold', textAlign: 'center' };
+const swapResult = { padding: '18px', backgroundColor: '#0f172a15', border: '1px dashed #334155', borderRadius: '16px', fontSize: '20px', color: '#00ff88', fontWeight: 'bold' };
+const swapBtn = { width: '100%', padding: '18px', borderRadius: '16px', border: 'none', background: 'linear-gradient(90deg, #00ff88 0%, #00d084 100%)', color: '#0f172a', fontWeight: '800', fontSize: '16px', marginTop: '30px', cursor: 'pointer' };
 
-const tableCard = { backgroundColor: '#fff', padding: '25px', borderRadius: '16px', border: '1px solid #e5e7eb', overflowX: 'auto' };
-const tableStyle = { width: '100%', borderCollapse: 'collapse', textAlign: 'left' };
-const thStyle = { borderBottom: '2px solid #f3f4f6', color: '#9ca3af', padding: '15px' };
-const trStyle = { borderBottom: '1px solid #f3f4f6' };
-const tdStyle = { padding: '15px' };
-const statusBadge = { backgroundColor: '#f0fdf4', color: '#16a34a', padding: '4px 10px', borderRadius: '50px', fontSize: '12px', fontWeight: 'bold' };
+const kycAlert = { display: 'flex', alignItems: 'center', backgroundColor: '#fbbf2415', border: '1px solid #fbbf24', padding: '20px 30px', borderRadius: '20px', gap: '30px' };
+const kycActionBtn = { background: '#fbbf24', color: '#0f172a', border: 'none', padding: '12px 30px', borderRadius: '12px', fontWeight: 'bold', cursor: 'pointer' };
 
-const adminActionCard = { backgroundColor: '#fff', padding: '30px', borderRadius: '16px', border: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', gap: '20px' };
-const adminBtn = { backgroundColor: '#111827', color: '#fff', border: 'none', padding: '15px 30px', borderRadius: '10px', fontWeight: 'bold', cursor: 'pointer' };
-
-const legalPage = { maxWidth: '900px', backgroundColor: '#fff', padding: '40px', borderRadius: '20px', border: '1px solid #e5e7eb' };
-const legalSection = { marginBottom: '25px' };
-const warningBox = { padding: '20px', backgroundColor: '#fef2f2', border: '1px solid #fee2e2', color: '#991b1b', borderRadius: '10px', fontSize: '13px' };
-
-const modalOverlay = { position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 2000 };
-const modalContent = { backgroundColor: '#fff', width: '90%', maxWidth: '800px', maxHeight: '90vh', borderRadius: '24px', overflowY: 'auto', position: 'relative' };
-const modalHeader = { padding: '25px 30px', borderBottom: '1px solid #e5e7eb', display: 'flex', justifyContent: 'space-between', alignItems: 'center', position: 'sticky', top: 0, backgroundColor: '#fff' };
-const modalBody = { padding: '30px' };
-const modalImg = { width: '100%', height: '300px', objectFit: 'cover', borderRadius: '16px', marginBottom: '25px' };
-const modalGrid = { display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '20px', marginBottom: '30px' };
-const modalInfoItem = { display: 'flex', flexDirection: 'column', gap: '5px', fontSize: '14px', borderBottom: '1px solid #f3f4f6', paddingBottom: '10px' };
-const modalSection = { marginBottom: '30px' };
-const docLinkCard = { display: 'flex', justifyContent: 'space-between', backgroundColor: '#f9fafb', padding: '15px 20px', borderRadius: '12px', alignItems: 'center' };
-const closeBtn = { background: 'none', border: 'none', fontSize: '24px', cursor: 'pointer', color: '#9ca3af' };
-
-const toastStyle = { position: 'fixed', bottom: '30px', left: '50%', transform: 'translateX(-50%)', backgroundColor: '#111827', color: '#fff', padding: '12px 30px', borderRadius: '50px', zIndex: 10000 };
+const modalOverlay = { position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: '#000000bb', backdropFilter: 'blur(8px)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 2000 };
+const modalContent = { backgroundColor: '#1e293b', width: '90%', maxWidth: '700px', borderRadius: '32px', overflow: 'hidden' };
+const modalHeader = { padding: '30px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #334155' };
+const modalImg = { width: '100%', height: '300px', objectFit: 'cover' };
+const dot = (v) => ({ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: v ? '#00ff88' : '#ef4444', boxShadow: v ? '0 0 10px #00ff88' : 'none' });
+const toastStyle = { position: 'fixed', bottom: '40px', left: '50%', transform: 'translateX(-50%)', backgroundColor: '#fff', color: '#0f172a', padding: '14px 40px', borderRadius: '16px', fontWeight: 'bold', zIndex: 10000, boxShadow: '0 20px 25px -5px rgba(0,0,0,0.5)' };
 
 export default App;
