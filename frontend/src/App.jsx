@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { ethers } from 'ethers';
 import axios from 'axios';
 
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
+
 function App() {
   const [properties, setProperties] = useState([]);
   const [config, setConfig] = useState(null);
@@ -35,9 +37,9 @@ function App() {
   const initApp = async () => {
     try {
         const [conf, prop, txs] = await Promise.all([
-            axios.get('http://localhost:3001/api/config'),
-            axios.get('http://localhost:3001/api/properties'),
-            axios.get('http://localhost:3001/api/transactions')
+            axios.get(`${API_BASE}/api/config`),
+            axios.get(`${API_BASE}/api/properties`),
+            axios.get(`${API_BASE}/api/transactions`)
         ]);
         setConfig(conf.data);
         setProperties(prop.data);
@@ -57,8 +59,8 @@ function App() {
             usdc.balanceOf(walletAddress),
             property.balanceOf(walletAddress),
             registry.checkIdentity(walletAddress),
-            axios.get(`http://localhost:3001/api/pwa/balance/${walletAddress}`),
-            axios.get(`http://localhost:3001/api/rewards/${walletAddress}`)
+            axios.get(`${API_BASE}/api/pwa/balance/${walletAddress}`),
+            axios.get(`${API_BASE}/api/rewards/${walletAddress}`)
         ]);
 
         setBalance(ethers.formatUnits(uBal, 18));
@@ -67,9 +69,30 @@ function App() {
         setPwaBalance(pwaRes.data.balance);
         setClaimableRent(rentRes.data.claimable);
         
-        const txs = await axios.get('http://localhost:3001/api/transactions');
+        const txs = await axios.get(`${API_BASE}/api/transactions`);
         setTransactions(txs.data);
     } catch (e) { console.warn(e); }
+  };
+
+  // 寫入型 API 一律要用錢包簽章證明自己控制該地址：
+  // 先跟後端要一次性 nonce，簽完再連同簽章送出。
+  const signedPost = async (path, payload = {}) => {
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const signer = await provider.getSigner();
+    const address = await signer.getAddress();
+    const { data: challenge } = await axios.post(`${API_BASE}/api/auth/nonce`, { address });
+    const signature = await signer.signMessage(challenge.message);
+    return axios.post(`${API_BASE}${path}`, { ...payload, address, nonce: challenge.nonce, signature });
+  };
+
+  const completeKyc = async () => {
+    setLoading(true);
+    try {
+        const res = await signedPost('/api/kyc');
+        setMessage(res.data.message);
+        refreshData();
+    } catch (e) { setMessage(e?.response?.data?.error || "KYC Failed"); }
+    setLoading(false);
   };
 
   const connectWallet = async () => {
@@ -83,7 +106,7 @@ function App() {
   const buyPwa = async (usdcAmount) => {
     setLoading(true);
     try {
-        const res = await axios.post('http://localhost:3001/api/pwa/buy', { address: walletAddress, usdcAmount });
+        const res = await signedPost('/api/pwa/buy', { usdcAmount });
         setMessage(res.data.message);
         refreshData();
     } catch (e) { setMessage("Swap Failed"); }
@@ -94,7 +117,7 @@ function App() {
     if (!kycStatus) return setMessage("Complete KYC First");
     setLoading(true);
     try {
-        await axios.post('http://localhost:3001/api/buy', { address: walletAddress, amount });
+        await signedPost('/api/buy', { amount });
         setMessage("Investment Confirmed on PepeChain");
         refreshData();
     } catch (e) { setMessage("Investment Failed"); }

@@ -6,8 +6,12 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const RPC_URL = "http://127.0.0.1:8545";
-const PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const RPC_URL = process.env.RPC_URL || "http://127.0.0.1:8545";
+// 預設值是 Anvil 公開測試帳號 #0（本機開發用）。部署到任何非本機網路前
+// 一定要改用環境變數 DEPLOYER_PRIVATE_KEY，切勿把真實私鑰寫進原始碼。
+const PRIVATE_KEY =
+  process.env.DEPLOYER_PRIVATE_KEY ||
+  "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 async function main() {
   const provider = new ethers.JsonRpcProvider(RPC_URL);
@@ -59,6 +63,10 @@ async function main() {
   const distributor = await DistFactory.deploy(propertyAddress, usdcAddress, { nonce: currentNonce++ });
   await distributor.waitForDeployment();
   const distributorAddress = await distributor.getAddress();
+
+  // 6. 把分配器綁到 PropertyToken：轉帳時會回呼 settle() 先結算雙方收益，
+  //    避免「領完再轉到新地址重複領」的漏洞。
+  await (await property.setRentalDistributor(distributorAddress, { nonce: currentNonce++ })).wait();
 
   // Pre-approve distributor
   await (await new ethers.Contract(usdcAddress, usdcArtifact.abi, wallet).approve(distributorAddress, ethers.MaxUint256, { nonce: currentNonce++ })).wait();
